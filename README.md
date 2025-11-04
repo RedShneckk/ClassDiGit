@@ -4,8 +4,8 @@ An interactive web application that recognizes hand-drawn digits (0-9) using two
 
 ---
 
-## Live Demo Link
- --> [https://<your-github-username>.github.io/ClassDiGit/](https://<your-github-username>.github.io/ClassDiGit/)
+**Live Demo Link:** [ClassDiGit (GitHub Pages)](https://redshneckk.github.io/ClassDiGit/)
+
 
 ---
 
