@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="fr">
+    <style>
+  .prob-bar{ transition: width .25s ease; }
+    </style>
+
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>MNIST WebGPU — MLP & CNN</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body class="min-h-screen bg-gray-50 p-6">
+    <div class="mx-auto max-w-5xl grid gap-6 md:grid-cols-5">
+      <!-- Panneau gauche -->
+      <section class="md:col-span-2 space-y-4">
+        <header class="border bg-white shadow-sm rounded-xl p-5 space-y-2">
+          <h1 class="text-2xl font-bold">ClassDiGit </h1>
+          <p class="text-sm text-gray-600">Draw a digit between 0 and 9.</p>
+        </header>
+
+        <div class="border bg-white shadow-sm rounded-xl p-5 space-y-3">
+          <label class="text-sm font-medium">Model</label>
+          <select id="model" class="w-full h-10 rounded-md border bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2">
+            <option value="mnist_mlp">mnist_mlp</option>
+            <option value="mnist_convnet">mnist_convnet</option>
+          </select>
+          <button id="clear" class="w-full h-10 rounded-md bg-gray-100 hover:bg-gray-200 transition">Clear drawing</button>
+          <div class="grid grid-cols-2 gap-2">
+            <button id="pen" class="h-10 rounded-md bg-black text-white">Pen</button>
+            <button id="eraser" class="h-10 rounded-md bg-black/80 text-white">Eraser</button>
+          </div>
+         <div class="text-sm text-gray-600 space-y-2">
+        <div>
+            <span class="font-medium">Status:</span>
+            <span id="status">initialisation…</span>
+            <div class="h-1 w-full bg-gray-200 rounded">
+            <div id="progress" class="h-1 w-0 bg-indigo-500 rounded"></div>
+            </div>
+        </div>
+        <p><span class="font-medium">Time:</span> <span id="timer">—</span></p>
+        <p>
+            <span class="font-medium">Prediction:</span>
+            <span id="pred" class="text-gray-700">—</span>
+        </p>
+
+        </div>
+
+        </div>
+
+        <div class="border bg-white shadow-sm rounded-xl p-5 space-y-3">
+          <h2 class="font-semibold">Tips</h2>
+          <ul class="list-disc list-inside text-sm text-gray-600 space-y-1">
+            <li>Click "Pen" to draw on the canvas using your finger or mouse.</strong> .</li>
+            <li>Switch models to compare MLP and CNN.</li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- Panneau droit  -->
+      <section class="md:col-span-3 space-y-4">
+        <div class="border bg-white shadow-sm rounded-xl p-5 space-y-3">
+          <h2 class="font-semibold">Canvas</h2>
+          <div class="relative mx-auto w-full max-w-[360px] aspect-square">
+            <canvas id="canvas" width="360" height="360" class="rounded-xl border shadow-sm touch-none select-none"></canvas>
+          </div>
+          <div class="text-xs text-gray-500"></div>
+        </div>
+
+        <div class="border bg-white shadow-sm rounded-xl p-5 space-y-4">
+          <h2 class="font-semibold">probabilities</h2>
+          <div id="bars" class="grid grid-cols-1 gap-2"></div>
+        </div>
+      </section>
+    </div>
+
+    <script type="module">
+    //WebGPU check
+    if (!navigator.gpu) {
+    document.body.innerHTML = `
+        <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;
+                    height:100vh;font-family:sans-serif;text-align:center;padding:20px;">
+        <h1 style="font-size:1.5rem;color:#111;">WebGPU not available</h1>
+        <p style="margin-top:10px;color:#444;max-width:420px;">
+            Your browser does not support WebGPU.<br>
+            <b>Please use Google Chrome 113 or newer</b> on a desktop or Android device.
+        </p>
+         <p style="margin-top:20px;font-size:0.9rem;color:#777;">
+         (WebGPU is currently not supported on iPhone or iPad)
+         </p>
+     </div>
+        `;
+         throw new Error("WebGPU not supported");
+}
+
+      const modelSelect = document.getElementById('model');
+      const statusText  = document.getElementById('status');
+      const timerText   = document.getElementById('timer');
+      const predText    = document.getElementById('pred');
+      const clearBtn    = document.getElementById('clear');
+      const penBtn      = document.getElementById('pen');
+      const eraserBtn   = document.getElementById('eraser');
+      const bars        = document.getElementById('bars');
+      const progress    = document.getElementById('progress');
+      
+
+
+      
+      const cv = document.getElementById('canvas');
+      const ctx = cv.getContext('2d', { willReadFrequently: true });
+      const W = cv.width, H = cv.height, PEN_SIZE = 22;
+      let drawing = false, mode = 'pen';
+      let inferTimer=null;
+
+      function resetCanvas() {
+        clearTimeout(inferTimer);      
+        drawing = false;
+
+        ctx.save();
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, W, H);
+        ctx.restore();
+        ctx.beginPath();               
+        drawGrid();
+
+        predText.textContent = '—';
+        timerText.textContent = '—';
+        renderBars([]);
+       
+              
+        }
+
+      const drawGrid = () => {
+        ctx.save(); ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.lineWidth = 1;
+        const step = W/28;
+        for (let i=1;i<28;i++){
+          ctx.beginPath(); ctx.moveTo(i*step,0); ctx.lineTo(i*step,H); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(0,i*step); ctx.lineTo(W,i*step); ctx.stroke();
+        }
+        ctx.restore();
+      };
+      resetCanvas();
+
+      const getPos = (e) => {
+        const r = cv.getBoundingClientRect();
+        const x = (e.touches? e.touches[0].clientX : e.clientX) - r.left;
+        const y = (e.touches? e.touches[0].clientY : e.clientY) - r.top;
+        return {x,y};
+      };
+      const dot = (x, y) => {
+        ctx.save();
+        ctx.globalCompositeOperation = 'source-over';    
+        ctx.fillStyle = mode === 'pen' ? '#ffffff' : '#000000'; 
+        ctx.beginPath();
+        ctx.arc(x, y, PEN_SIZE, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      };
+
+      const onDown = (e)=>{ drawing = true; const {x,y}=getPos(e); dot(x,y); e.preventDefault(); };
+      const onMove = (e)=>{ if(!drawing) return; const {x,y}=getPos(e); dot(x,y); e.preventDefault(); };
+      const onUp = () => { if (!drawing) return; drawing = false; triggerInferenceDebounced();};
+
+
+      cv.addEventListener('mousedown', onDown); window.addEventListener('mouseup', onUp); 
+      cv.addEventListener('mousemove', onMove);
+      cv.addEventListener('touchstart', onDown, {passive:false}); 
+      window.addEventListener('touchend', () => { if (!drawing) return;drawing = false;triggerInferenceDebounced();});
+      cv.addEventListener('touchmove', onMove, {passive:false});
+
+      clearBtn.onclick = resetCanvas;
+      penBtn.onclick = ()=>{ mode='pen'; penBtn.classList.add('ring'); eraserBtn.classList.remove('ring'); };
+      eraserBtn.onclick = ()=>{ mode='eraser'; eraserBtn.classList.add('ring'); penBtn.classList.remove('ring'); };
+      penBtn.click();
+
+     
+      let device = null, net = null;
+
+      const timer = async (fn, label='') => {
+        timerText.textContent = '';
+        const t0 = performance.now();
+        const out = await fn();
+        const dt = (performance.now()-t0).toFixed(1);
+        timerText.textContent = `${dt} ms ${label}`;
+        return out;
+      };
+      const error = (e) => { statusText.textContent = 'Erreur: ' + e.message; console.error(e); };
+
+      const getDevice = async () => {
+        if (!navigator.gpu) throw new Error('WebGPU non supporté par ce navigateur.');
+        const adapter = await navigator.gpu.requestAdapter();
+        return await adapter.requestDevice({ requiredFeatures:['shader-f16'], powerPreference:'high-performance' });
+      };
+
+      const loadNet = async (name) => {
+        try {
+            statusText.textContent = 'Chargement du modèle…';
+            progress.style.width = '20%';
+            if (!device) device = await getDevice();
+            progress.style.width = '50%';
+
+            const jsPath  = `./${name}/${name}.js`;
+            const weights = `./${name}/${name}.webgpu.safetensors`;
+            const tinygrad = (await import(jsPath)).default;
+
+            net = await timer(() => tinygrad.load(device, weights), '(compilation)');
+            progress.style.width = '100%';
+            setTimeout(() => progress.style.width = '0%', 600);
+
+            statusText.textContent = 'Ready';
+            } catch(e) { error(e); }
+       };
+
+      modelSelect.addEventListener('change', (e)=> loadNet(e.target.value));
+
+     
+      const down = document.createElement('canvas'); down.width=28; down.height=28;
+      const dctx = down.getContext('2d');
+
+      const getInputTensor = () => {
+        dctx.clearRect(0,0,28,28);
+        dctx.imageSmoothingEnabled = true; dctx.imageSmoothingQuality = 'high';
+        dctx.drawImage(cv, 0, 0, 28, 28);
+        const { data } = dctx.getImageData(0,0,28,28);
+        const out = new Float32Array(28*28);
+        for (let i=0,j=0;i<data.length;i+=4,j++) {
+          out[j] = (data[i] / 255) * 2 - 1; 
+        }
+        return out;
+      };
+
+     
+      const softmax = (arr)=> {
+        if (!arr.length) return [];
+        const m = Math.max(...arr);
+        const exps = arr.map(v=>Math.exp(v-m));
+        const s = exps.reduce((a,b)=>a+b,0);
+        return exps.map(v=>v/s);
+      };
+      function renderBars(probs) {
+   
+        if (!probs || probs.length === 0) {
+            bars.innerHTML = '';
+            return;
+        }
+        bars.innerHTML = '';
+        for (let d = 0; d < 10; d++) {
+            const p = probs[d] ?? 0;
+            const row = document.createElement('div');
+            row.className = 'flex items-center gap-3';
+            row.innerHTML = `
+            <div class="w-6 text-right text-sm text-muted-foreground">${d}</div>
+            <div class="flex-1 h-3 bg-muted rounded overflow-hidden">
+                <div class="h-full bg-blue-600 prob-bar" style="width:${(p*100).toFixed(1)}%"></div>
+            </div>
+            <div class="w-14 text-right text-sm tabular-nums">${(p*100).toFixed(1)}%</div>
+            `;
+            bars.appendChild(row);
+        }
+        }
+
+
+
+      
+     
+      const triggerInferenceDebounced = ()=> { clearTimeout(inferTimer); inferTimer = setTimeout(runNet, 160); };
+      const runNet = async ()=> {
+        try{
+          if (!net) throw new Error('Modèle non chargé');
+          const input = getInputTensor();
+          const res = await timer(()=> net(input), '(inference)');
+          const logits = Array.from(new Float32Array(res[0]));
+          const probs = softmax(logits);
+          const top = probs.reduce((b,p,i)=> p>b.p? {p, i}: b, {p:-1, i:-1});
+          predText.textContent = `${top.i} (${(top.p*100).toFixed(1)}%)`;
+          
+
+          renderBars(probs);
+        }catch(e){ error(e); }
+      };
+
+     
+      (async ()=> { await loadNet(modelSelect.value); renderBars([]); })();
+    </script>
+  </body>
+</html>
